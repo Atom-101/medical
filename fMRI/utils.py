@@ -79,3 +79,26 @@ def double_nce(preds, targs, temp=0.1):
     # keeps off-diagonal elements only
     logits = torch.concat([brain_clip, brain_brain_offd], dim=-1)  # n, 2n-1
     return F.cross_entropy(logits, torch.arange(n).to(logits.device))
+
+
+def mixco(voxels, beta=0.15, s_thresh=0.5):
+    perm = torch.randperm(voxels.shape[0]).to(voxels.device)
+    voxels_shuffle = voxels[perm]
+    betas = torch.distributions.Beta(beta, beta).sample([voxels.shape[0]]).to(voxels.device)
+    select = (torch.rand(voxels.shape[0]) <= s_thresh).to(voxels.device)
+    
+    voxels[select] = voxels[select] * betas[select].reshape(-1, 1) + voxels_shuffle[select] * (1 - betas[select]).reshape(-1, 1)
+    betas[~select] = 1
+    return voxels, perm, betas, select
+
+
+def mixco_nce(preds, targs, temp=0.1, perm=None, betas=None, select=None):
+    brain_clip = (preds @ targs.T)/temp
+    if perm is not None and betas is not None and select is not None:
+        probs = torch.diag(betas)
+        probs[torch.arange(preds.shape[0]).to(preds.device), perm] = 1 - betas
+
+        loss = -(brain_clip.log_softmax(-1) * probs).sum(-1).mean()
+        return loss
+    else:
+        return F.cross_entropy(brain_clip, torch.arange(brain_clip.shape[0]).to(brain_clip.device))

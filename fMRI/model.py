@@ -25,7 +25,7 @@ class Clipper(torch.nn.Module):
         self.clip_size = (224,224)
         self.transforms = train_transforms
 
-    def embed_image(self, image):
+    def embed_image(self, image, return_norm=False):
         """Expects images in -1 to 1 range"""
         # import pdb; pdb.set_trace()
         clip_emb = nn.functional.interpolate(image.to(self.device), self.clip_size, mode="area")
@@ -33,9 +33,13 @@ class Clipper(torch.nn.Module):
             clip_emb = self.transforms(clip_emb)
         # clip_emb = (0.5*clip_emb + 0.5).clamp(0,1)
         clip_emb = self.clip.encode_image(self.normalize(clip_emb))
-        clip_emb = torch.clamp(clip_emb, -1.5, 1.5)
+        # clip_emb = torch.clamp(clip_emb, -1.5, 1.5)
+        clip_emb_norm = clip_emb.norm(2,dim=-1)
         clip_emb = nn.functional.normalize(clip_emb, dim=-1)
-        return clip_emb
+        if not return_norm:
+            return clip_emb
+        else:
+             return clip_emb, clip_emb_norm
 
     def embed_text(self, text_samples):
         clip_text = clip.tokenize(text_samples).to(self.device)

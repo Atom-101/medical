@@ -3,7 +3,7 @@ sbatch << EOT
 #!/bin/bash
 #SBATCH -n 8                # Number of cores
 #SBATCH -N 1                # Ensure that all cores are on one machine
-#SBATCH -t 32:00:00         # Runtime in D-HH:MM, minimum of 10 minutes
+#SBATCH -t 21:00:00         # Runtime in D-HH:MM, minimum of 10 minutes
 #SBATCH -p gpu         # Partition to submit to
 #SBATCH --gres=gpu:1        # Number of GPUs
 #SBATCH --mem=64000         # Memory pool for all cores (see also --mem-per-cpu)

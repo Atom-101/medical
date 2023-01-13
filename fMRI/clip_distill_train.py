@@ -27,7 +27,7 @@ from utils import *
 from model import *
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-EPOCHS = 100  # 800
+EPOCHS = 125  # 800
 print("device:",device)
 
 def seed_everything(seed=0):
@@ -55,13 +55,13 @@ def main(exp_name):
         # random_apply = (1,4)
     )
     print('full_training:',full_training)
-    model_name = 'clip_image_vitB' # CLIP ViT-L/14 image embeddings
+    model_name = 'clip_image_vitL' # CLIP ViT-L/14 image embeddings
     print(f"Using model: {model_name}")
     if "resnet" in model_name: 
         clip_extractor = Clipper("RN50")
     else:
-        # clip_extractor = Clipper("ViT-L/14", train_transforms=train_augs)
-        clip_extractor = Clipper("ViT-B/32", train_transforms=train_augs)
+        clip_extractor = Clipper("ViT-L/14", train_transforms=train_augs)
+        # clip_extractor = Clipper("ViT-B/32", train_transforms=train_augs)
     if "text" in model_name:     
         image_var = 'trial' 
     else:
@@ -149,12 +149,12 @@ def main(exp_name):
         {'params': [p for n, p in brain_net.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
     ]
     opt = torch.optim.AdamW(opt_grouped_parameters, lr=1e-3)
-    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=1e-3, #3e-4, 
+    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=3e-4, 
                                                 total_steps=EPOCHS*((24983//300)//num_devices), 
                                                 final_div_factor=1000,
                                                 last_epoch=-1, pct_start=2/EPOCHS)
 
-    nce = InfoNCE()
+    nce = mixco_nce  # InfoNCE()
     using_ddp = False
     #############
     ### Train ###
@@ -185,27 +185,40 @@ def main(exp_name):
         for train_i, (voxel, img_input) in enumerate(inner_bar):
             opt.zero_grad()
             voxel = voxel.to(device)
+            if epoch < int(0.5*EPOCHS):
+                voxel, perm, betas, select = mixco(voxel.float())
             with torch.cuda.amp.autocast():
                 with torch.no_grad():
                     if image_var=='images': # using images
-                        emb = clip_extractor.embed_image(img_input)
+                        emb, norm_emb = clip_extractor.embed_image(img_input, return_norm=True)
                     else: # using text captions of the images 
                         emb = clip_extractor.embed_curated_annotations(subj01_annots[img_input])
 
-            emb = emb.float() # cast to float32
+            norm_emb, emb = norm_emb.float(), emb.float()  # cast to float32
             emb_ = brain_net(voxel.float())
 
             if torch.any(torch.isnan(emb_)):
                 raise ValueError("NaN found...")
 
+            norm_emb_ = emb_.norm(2, dim=-1)
             emb_ = nn.functional.normalize(emb_,dim=-1) # l2 normalization on the embeddings
 
             labels = torch.arange(len(emb)).to(device)
-            loss_nce = nce(emb_.reshape(len(emb),-1),emb.reshape(len(emb),-1))
             # loss_nce = 0
             # loss_nce = double_nce(emb_.reshape(len(emb),-1),emb.reshape(len(emb),-1))
-            loss_soft = soft_clip_loss(emb_.reshape(len(emb),-1), emb.reshape(len(emb),-1))
-            loss = loss_nce + loss_soft
+            
+            if epoch < int(0.5*EPOCHS):
+                loss_nce = nce(emb_.reshape(len(emb),-1),emb.reshape(len(emb),-1), temp=0.006, 
+                               perm=perm, betas=betas, select=select)
+                loss_soft = 0
+                loss = loss_nce
+            else:
+                # epoch_temp = np.linspace(0.06, 0.18, EPOCHS-int(0.5*EPOCHS), endpoint=True)[epoch-int(0.5*EPOCHS)]
+                epoch_temp = np.linspace(0.004, 0.0075, EPOCHS-int(0.5*EPOCHS), endpoint=True)[epoch-int(0.5*EPOCHS)]
+                loss_soft = soft_clip_loss(emb_.reshape(len(emb),-1), emb.reshape(len(emb),-1), temp=epoch_temp)
+                loss_nce = 0
+                loss = loss_soft
+            # loss += F.mse_loss(norm_emb, norm_emb_)
 
             similarities = batchwise_cosine_similarity(emb,emb_)
 
@@ -236,7 +249,13 @@ def main(exp_name):
 
                     labels = torch.arange(len(val_emb)).to(device)
 
-                    val_loss = nce(val_emb_.reshape(len(val_emb),-1),val_emb.reshape(len(val_emb),-1))
+                    if epoch < int(0.5*EPOCHS):
+                        val_loss = nce(val_emb_.reshape(len(val_emb),-1),val_emb.reshape(len(val_emb),-1), temp=0.006)
+                    else:
+                        epoch_temp = np.linspace(0.004, 0.0075, EPOCHS-int(0.5*EPOCHS), endpoint=True)[epoch-int(0.5*EPOCHS)]
+                        val_loss = soft_clip_loss(val_emb_.reshape(len(val_emb),-1),
+                                                  val_emb.reshape(len(val_emb),-1), 
+                                                  temp=epoch_temp)
 
                     val_similarities = batchwise_cosine_similarity(val_emb,val_emb_)
 
@@ -244,7 +263,7 @@ def main(exp_name):
 
                 val_losses.append(val_loss.item())
                 val_topk.append(val_percent_correct.item())
-                if val_percent_correct > best_val_topk:
+                if val_percent_correct >= best_val_topk:
                     best_val_topk = val_percent_correct.item()
                     state_dict = brain_net.state_dict()
                     if using_ddp: # if using DDP, convert DDP to non-DDP before saving
@@ -260,7 +279,7 @@ def main(exp_name):
                         'lrs': lrs,
                         }, f'checkpoints/{model_name}_{exp_name}_subj01_best.pth')
 
-        if epoch%100==99 and full_training:
+        if epoch%25==24 and full_training:
             print(f'saving checkpoints/{model_name}_{exp_name}_subj01_epoch{epoch+1}.pth...')
             if (not using_ddp) or (using_ddp and local_rank==0):
                 state_dict = brain_net.state_dict()

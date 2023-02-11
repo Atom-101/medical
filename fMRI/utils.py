@@ -86,8 +86,9 @@ def mixco(voxels, beta=0.15, s_thresh=0.5):
     voxels_shuffle = voxels[perm]
     betas = torch.distributions.Beta(beta, beta).sample([voxels.shape[0]]).to(voxels.device)
     select = (torch.rand(voxels.shape[0]) <= s_thresh).to(voxels.device)
-    
-    voxels[select] = voxels[select] * betas[select].reshape(-1, 1) + voxels_shuffle[select] * (1 - betas[select]).reshape(-1, 1)
+    betas_shape = [-1] + [1]*(len(voxels.shape)-1)
+    voxels[select] = voxels[select] * betas[select].reshape(*betas_shape) + \
+        voxels_shuffle[select] * (1 - betas[select]).reshape(*betas_shape)
     betas[~select] = 1
     return voxels, perm, betas, select
 

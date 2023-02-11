@@ -25,6 +25,7 @@ from collections import OrderedDict
 
 from utils import *
 from model import *
+from model3d import *
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 EPOCHS = 125  # 800
@@ -87,7 +88,7 @@ def main(exp_name):
         print("num_devices",num_devices)
         num_workers = num_devices
         print("num_workers",num_workers)
-        batch_size = 300 # 768
+        batch_size = 8 # 300 # 768
         print("batch_size",batch_size)
         num_samples = 24983 # see metadata.json in webdataset_split folder
         global_batch_size = batch_size * num_devices
@@ -101,7 +102,7 @@ def main(exp_name):
                         wds.tarfile_to_samples(),
                         wds.shuffle(500,initial=500),
                         wds.decode("torch"),
-                        wds.rename(images="jpg;png", voxels="nsdgeneral.npy", embs="sgxl_emb.npy", trial="trial.npy"),
+                        wds.rename(images="jpg;png", voxels="wholebrain_3d.npy", embs="sgxl_emb.npy", trial="trial.npy"),
                         wds.to_tuple("voxels", image_var),
                         wds.batched(batch_size, partial=True),
                     ]).with_epoch(num_worker_batches)
@@ -110,7 +111,7 @@ def main(exp_name):
 
     # Validation #
     num_samples = 492
-    val_batch_size = 300
+    val_batch_size = 32
     num_batches = math.ceil(num_samples / val_batch_size)
     num_worker_batches = math.ceil(num_batches / num_workers)
     print("validation: num_worker_batches",num_worker_batches)
@@ -119,7 +120,7 @@ def main(exp_name):
     val_data = wds.DataPipeline([wds.ResampledShards(url),
                         wds.tarfile_to_samples(),
                         wds.decode("torch"),
-                        wds.rename(images="jpg;png", voxels="nsdgeneral.npy", 
+                        wds.rename(images="jpg;png", voxels="wholebrain_3d.npy", 
                                     embs="sgxl_emb.npy", trial="trial.npy"),
                         wds.to_tuple("voxels", image_var),
                         wds.batched(batch_size, partial=True),
@@ -141,7 +142,15 @@ def main(exp_name):
         print("out_dim", out_dim)
         break
     
-    brain_net = BrainNetwork(out_dim).to(device)
+    # brain_net = BrainNetwork(out_dim).to(device)
+    # L-14 config
+    brain_net = NewVoxel3dConvEncoder(
+        dims=[42, 46, 61],  # Pass anything, these values are not used
+        attention_width=64,
+        output_dim=out_dim,
+        average_output=False,
+        # act_layer=act_layer
+    ).to(device)
     # brain_net = BrainNetworkLarge(out_dim).to(device)
     no_decay = ['bias']
     opt_grouped_parameters = [
@@ -185,6 +194,9 @@ def main(exp_name):
         for train_i, (voxel, img_input) in enumerate(inner_bar):
             opt.zero_grad()
             voxel = voxel.to(device)
+            if voxel.ndim == 4:
+                voxel = voxel.unsqueeze(1)
+            # import pdb; pdb.set_trace()
             if epoch < int(0.5*EPOCHS):
                 voxel, perm, betas, select = mixco(voxel.float())
             with torch.cuda.amp.autocast():
@@ -237,7 +249,9 @@ def main(exp_name):
         for val_i, (val_voxel, val_img_input) in enumerate(val_dl):
             with torch.no_grad(): 
                 val_voxel = val_voxel.to(device)
-
+                if val_voxel.ndim == 4:
+                    val_voxel = val_voxel.unsqueeze(1)
+                
                 with torch.cuda.amp.autocast():
                     if image_var=='images': # using images
                         val_emb = clip_extractor.embed_image(val_img_input)
